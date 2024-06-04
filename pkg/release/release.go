@@ -40,6 +40,8 @@ type Release struct {
 	// Labels of the release.
 	// Disabled encoding into Json cause labels are stored in storage driver metadata field.
 	Labels map[string]string `json:"-"`
+	// ConfigRaw是config的string形式
+	ConfigRaw string `json:"configRaw,omitempty"`
 }
 
 // SetStatus is a helper for setting the status on a release.

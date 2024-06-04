@@ -21,14 +21,13 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-
 	"helm.sh/helm/v3/pkg/kube"
 	"helm.sh/helm/v3/pkg/release"
 	helmtime "helm.sh/helm/v3/pkg/time"
 )
 
 // execHook executes all of the hooks for the given hook event.
-func (cfg *Configuration) execHook(rl *release.Release, hook release.HookEvent, timeout time.Duration) error {
+func (cfg *Configuration) execHook(rl *release.Release, hook release.HookEvent, timeout time.Duration, c7nOptions *Install) error {
 	executingHooks := []*release.Hook{}
 
 	for _, h := range rl.Hooks {
@@ -57,6 +56,18 @@ func (cfg *Configuration) execHook(rl *release.Release, hook release.HookEvent, 
 		}
 
 		resources, err := cfg.KubeClient.Build(bytes.NewBufferString(h.Manifest), true)
+
+		// 如果是agent升级，则跳过添加标签这一步，因为agent原本是直接在集群中安装的没有对应标签，如果在这里加标签k8s会报错
+		if c7nOptions.C7NOptions.ChartName != "choerodon-cluster-agent" {
+			// 在这里对要新chart包中的对象添加标签
+			for _, r := range resources {
+				err = AddLabel(r, nil, c7nOptions)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
 		if err != nil {
 			return errors.Wrapf(err, "unable to build kubernetes object for %s hook %s", hook, h.Path)
 		}

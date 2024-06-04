@@ -127,7 +127,7 @@ charts in a repository, use 'helm search'.
 `
 
 func newInstallCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
-	client := action.NewInstall(cfg)
+	client := action.NewInstall(cfg, &action.Install{})
 	valueOpts := &values.Options{}
 	var outfmt output.Format
 
@@ -311,7 +311,7 @@ func runInstall(args []string, client *action.Install, valueOpts *values.Options
 		cancel()
 	}()
 
-	return client.RunWithContext(ctx, chartRequested, vals)
+	return client.RunWithContext(ctx, chartRequested, vals, "")
 }
 
 // checkIfInstallable validates if a chart can be installed

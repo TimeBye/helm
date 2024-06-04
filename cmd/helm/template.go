@@ -50,7 +50,7 @@ func newTemplateCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 	var validate bool
 	var includeCrds bool
 	var skipTests bool
-	client := action.NewInstall(cfg)
+	client := action.NewInstall(cfg, &action.Install{})
 	valueOpts := &values.Options{}
 	var kubeVersion string
 	var extraAPIs []string

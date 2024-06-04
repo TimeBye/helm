@@ -113,6 +113,8 @@ type Upgrade struct {
 	Lock sync.Mutex
 	// Enable DNS lookups when rendering templates
 	EnableDNS bool
+
+	C7NOptions C7NOptions
 }
 
 type resultMessage struct {
@@ -121,9 +123,13 @@ type resultMessage struct {
 }
 
 // NewUpgrade creates a new Upgrade object with the given configuration.
-func NewUpgrade(cfg *Configuration) *Upgrade {
+func NewUpgrade(cfg *Configuration, opts *Upgrade) *Upgrade {
 	up := &Upgrade{
-		cfg: cfg,
+		cfg:              cfg,
+		MaxHistory:       3,
+		ChartPathOptions: opts.ChartPathOptions,
+		ReuseValues:      opts.ReuseValues,
+		C7NOptions:       opts.C7NOptions,
 	}
 	up.ChartPathOptions.registryClient = cfg.RegistryClient
 
@@ -136,13 +142,13 @@ func (u *Upgrade) SetRegistryClient(client *registry.Client) {
 }
 
 // Run executes the upgrade on the given release.
-func (u *Upgrade) Run(name string, chart *chart.Chart, vals map[string]interface{}) (*release.Release, error) {
+func (u *Upgrade) Run(name string, chart *chart.Chart, vals map[string]interface{}, valuesRaw string) (*release.Release, error) {
 	ctx := context.Background()
-	return u.RunWithContext(ctx, name, chart, vals)
+	return u.RunWithContext(ctx, name, chart, vals, valuesRaw)
 }
 
 // RunWithContext executes the upgrade on the given release with context.
-func (u *Upgrade) RunWithContext(ctx context.Context, name string, chart *chart.Chart, vals map[string]interface{}) (*release.Release, error) {
+func (u *Upgrade) RunWithContext(ctx context.Context, name string, chart *chart.Chart, vals map[string]interface{}, valuesRaw string) (*release.Release, error) {
 	if err := u.cfg.KubeClient.IsReachable(); err != nil {
 		return nil, err
 	}
@@ -156,7 +162,7 @@ func (u *Upgrade) RunWithContext(ctx context.Context, name string, chart *chart.
 	}
 
 	u.cfg.Log("preparing upgrade for %s", name)
-	currentRelease, upgradedRelease, err := u.prepareUpgrade(name, chart, vals)
+	currentRelease, upgradedRelease, err := u.prepareUpgrade(name, chart, vals, valuesRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +195,7 @@ func (u *Upgrade) isDryRun() bool {
 }
 
 // prepareUpgrade builds an upgraded release for an upgrade operation.
-func (u *Upgrade) prepareUpgrade(name string, chart *chart.Chart, vals map[string]interface{}) (*release.Release, *release.Release, error) {
+func (u *Upgrade) prepareUpgrade(name string, chart *chart.Chart, vals map[string]interface{}, valuesRaw string) (*release.Release, *release.Release, error) {
 	if chart == nil {
 		return nil, nil, errMissingChart
 	}
@@ -211,7 +217,7 @@ func (u *Upgrade) prepareUpgrade(name string, chart *chart.Chart, vals map[strin
 
 	// Concurrent `helm upgrade`s will either fail here with `errPending` or when creating the release with "already exists". This should act as a pessimistic lock.
 	if lastRelease.Info.Status.IsPending() {
-		return nil, nil, errPending
+		time.Sleep(60 * time.Second)
 	}
 
 	var currentRelease *release.Release
@@ -282,6 +288,7 @@ func (u *Upgrade) prepareUpgrade(name string, chart *chart.Chart, vals map[strin
 		Namespace: currentRelease.Namespace,
 		Chart:     chart,
 		Config:    vals,
+		ConfigRaw: valuesRaw,
 		Info: &release.Info{
 			FirstDeployed: currentRelease.Info.FirstDeployed,
 			LastDeployed:  Timestamper(),
@@ -316,6 +323,23 @@ func (u *Upgrade) performUpgrade(ctx context.Context, originalRelease, upgradedR
 	target, err := u.cfg.KubeClient.Build(bytes.NewBufferString(upgradedRelease.Manifest), !u.DisableOpenAPIValidation)
 	if err != nil {
 		return upgradedRelease, errors.Wrap(err, "unable to build kubernetes objects from new release manifest")
+	}
+
+	// 如果是agent升级，则跳过添加标签这一步，因为agent原本是直接在集群中安装的没有对应标签，如果在这里加标签k8s会报错
+	if u.C7NOptions.ChartName != "choerodon-cluster-agent" {
+		c7nOpts := &Install{
+			IsUpgrade:   true,
+			ReleaseName: u.C7NOptions.ReleaseName,
+			Namespace:   originalRelease.Namespace,
+			C7NOptions:  u.C7NOptions,
+		}
+		// 在这里对要新chart包中的对象添加标签
+		for _, r := range target {
+			err = AddLabel(r, u.cfg.ClientSet, c7nOpts)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// It is safe to use force only on target because these are resources currently rendered by the chart.
@@ -407,7 +431,12 @@ func (u *Upgrade) releasingUpgrade(c chan<- resultMessage, upgradedRelease *rele
 	// pre-upgrade hooks
 
 	if !u.DisableHooks {
-		if err := u.cfg.execHook(upgradedRelease, release.HookPreUpgrade, u.Timeout); err != nil {
+		c7nOpts := &Install{
+			ReleaseName: u.C7NOptions.ReleaseName,
+			Namespace:   originalRelease.Namespace,
+			C7NOptions:  u.C7NOptions,
+		}
+		if err := u.cfg.execHook(upgradedRelease, release.HookPreUpgrade, u.Timeout, c7nOpts); err != nil {
 			u.reportToPerformUpgrade(c, upgradedRelease, kube.ResourceList{}, fmt.Errorf("pre-upgrade hooks failed: %s", err))
 			return
 		}
@@ -453,7 +482,12 @@ func (u *Upgrade) releasingUpgrade(c chan<- resultMessage, upgradedRelease *rele
 
 	// post-upgrade hooks
 	if !u.DisableHooks {
-		if err := u.cfg.execHook(upgradedRelease, release.HookPostUpgrade, u.Timeout); err != nil {
+		c7nOpts := &Install{
+			ReleaseName: u.C7NOptions.ReleaseName,
+			Namespace:   originalRelease.Namespace,
+			C7NOptions:  u.C7NOptions,
+		}
+		if err := u.cfg.execHook(upgradedRelease, release.HookPostUpgrade, u.Timeout, c7nOpts); err != nil {
 			u.reportToPerformUpgrade(c, upgradedRelease, results.Created, fmt.Errorf("post-upgrade hooks failed: %s", err))
 			return
 		}

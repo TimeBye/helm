@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/discovery"
@@ -88,6 +89,8 @@ type Configuration struct {
 	// KubeClient is a Kubernetes API client.
 	KubeClient kube.Interface
 
+	ClientSet *kubernetes.Clientset
+
 	// RegistryClient is a client for working with registries
 	RegistryClient *registry.Client
 
@@ -95,6 +98,22 @@ type Configuration struct {
 	Capabilities *chartutil.Capabilities
 
 	Log func(string, ...interface{})
+}
+
+type C7NOptions struct {
+	AgentVersion     string
+	AppServiceId     int64
+	ChartName        string
+	ChartVersion     string
+	Command          int64
+	Commit           string
+	ImagePullSecret  []v1.LocalObjectReference
+	IsTest           bool
+	ReleaseName      string
+	ReplicasStrategy string
+	TestLabel        string
+	V1AppServiceId   string
+	V1Command        string
 }
 
 // renderResources renders the templates in a chart
@@ -379,6 +398,11 @@ func (cfg *Configuration) Init(getter genericclioptions.RESTClientGetter, namesp
 		clientFn:  kc.Factory.KubernetesClientSet,
 	}
 
+	clientset, err := kc.Factory.KubernetesClientSet()
+	if err != nil {
+		return err
+	}
+
 	var store *storage.Storage
 	switch helmDriver {
 	case "secret", "secrets", "":
@@ -423,6 +447,7 @@ func (cfg *Configuration) Init(getter genericclioptions.RESTClientGetter, namesp
 	cfg.KubeClient = kc
 	cfg.Releases = store
 	cfg.Log = log
+	cfg.ClientSet = clientset
 
 	return nil
 }

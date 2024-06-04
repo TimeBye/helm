@@ -80,7 +80,7 @@ which can contain sensitive values. To hide Kubernetes Secrets use the
 `
 
 func newUpgradeCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
-	client := action.NewUpgrade(cfg)
+	client := action.NewUpgrade(cfg, &action.Upgrade{})
 	valueOpts := &values.Options{}
 	var outfmt output.Format
 	var createNamespace bool
@@ -127,7 +127,7 @@ func newUpgradeCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 					if outfmt == output.Table {
 						fmt.Fprintf(out, "Release %q does not exist. Installing it now.\n", args[0])
 					}
-					instClient := action.NewInstall(cfg)
+					instClient := action.NewInstall(cfg, &action.Install{})
 					instClient.CreateNamespace = createNamespace
 					instClient.ChartPathOptions = client.ChartPathOptions
 					instClient.Force = client.Force
@@ -235,7 +235,7 @@ func newUpgradeCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 				cancel()
 			}()
 
-			rel, err := client.RunWithContext(ctx, args[0], ch, vals)
+			rel, err := client.RunWithContext(ctx, args[0], ch, vals, "")
 			if err != nil {
 				return errors.Wrap(err, "UPGRADE FAILED")
 			}

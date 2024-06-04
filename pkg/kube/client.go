@@ -42,7 +42,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -713,11 +712,14 @@ func (c *Client) watchUntilReady(timeout time.Duration, info *resource.Info) err
 
 	// Use a selector on the name of the resource. This should be unique for the
 	// given version and kind
-	selector, err := fields.ParseSelector(fmt.Sprintf("metadata.name=%s", info.Name))
+	l, _, err := unstructured.NestedStringMap(info.Object.(*unstructured.Unstructured).Object, "metadata", "labels")
 	if err != nil {
 		return err
 	}
-	lw := cachetools.NewListWatchFromClient(info.Client, info.Mapping.Resource.Resource, info.Namespace, selector)
+	optionsModifier := func(options *metav1.ListOptions) {
+		options.LabelSelector = fmt.Sprintf("%s=%s", "choerodon.io/commit", l["choerodon.io/commit"])
+	}
+	lw := cachetools.NewFilteredListWatchFromClient(info.Client, info.Mapping.Resource.Resource, info.Namespace, optionsModifier)
 
 	// What we watch for depends on the Kind.
 	// - For a Job, we watch for completion.
@@ -747,6 +749,9 @@ func (c *Client) watchUntilReady(timeout time.Duration, info *resource.Info) err
 			return true, nil
 		case watch.Deleted:
 			c.Log("Deleted event for %s", info.Name)
+			if strings.HasSuffix(info.Name, "init-db") {
+				return true, errors.Errorf("init job deleted")
+			}
 			return true, nil
 		case watch.Error:
 			// Handle error and return with an error.

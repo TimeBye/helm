@@ -25,6 +25,8 @@ import (
 
 	"helm.sh/helm/v3/cmd/helm/require"
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/cli/values"
+	"helm.sh/helm/v3/pkg/getter"
 )
 
 const showDesc = `
@@ -56,8 +58,15 @@ This command inspects a chart (directory, file, or URL) and displays the content
 of the CustomResourceDefinition files
 `
 
+const hookChartDesc = `
+This command inspects a chart (directory, file, or URL) and displays the contents
+of hooks
+`
+
 func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 	client := action.NewShowWithConfig(action.ShowAll, cfg)
+
+	client.Namespace = settings.Namespace()
 
 	showCommand := &cobra.Command{
 		Use:               "show",
@@ -88,7 +97,7 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output, err := runShow(args, client)
+			output, err := runShow(args, client, nil)
 			if err != nil {
 				return err
 			}
@@ -109,7 +118,7 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output, err := runShow(args, client)
+			output, err := runShow(args, client, nil)
 			if err != nil {
 				return err
 			}
@@ -130,7 +139,7 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output, err := runShow(args, client)
+			output, err := runShow(args, client, nil)
 			if err != nil {
 				return err
 			}
@@ -151,7 +160,7 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output, err := runShow(args, client)
+			output, err := runShow(args, client, nil)
 			if err != nil {
 				return err
 			}
@@ -172,7 +181,7 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output, err := runShow(args, client)
+			output, err := runShow(args, client, nil)
 			if err != nil {
 				return err
 			}
@@ -181,7 +190,31 @@ func newShowCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 		},
 	}
 
-	cmds := []*cobra.Command{all, readmeSubCmd, valuesSubCmd, chartSubCmd, crdsSubCmd}
+	hookSubCmd := &cobra.Command{
+		Use:   "hooks [CHART]",
+		Short: "shows the chart's hook",
+		Long:  hookChartDesc,
+		Args:  require.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			valueOpts := &values.Options{}
+			p := getter.All(settings)
+			vals, err := valueOpts.MergeValues(p)
+			if err != nil {
+				return err
+			}
+
+			client.OutputFormat = action.ShowHook
+			output, err := runShow(args, client, vals)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(out, output)
+			return nil
+		},
+	}
+
+	cmds := []*cobra.Command{all, readmeSubCmd, valuesSubCmd, chartSubCmd, hookSubCmd, crdsSubCmd}
 	for _, subCmd := range cmds {
 		addShowFlags(subCmd, client)
 		showCommand.AddCommand(subCmd)
@@ -211,7 +244,7 @@ func addShowFlags(subCmd *cobra.Command, client *action.Show) {
 	}
 }
 
-func runShow(args []string, client *action.Show) (string, error) {
+func runShow(args []string, client *action.Show, vals map[string]interface{}) (string, error) {
 	debug("Original chart version: %q", client.Version)
 	if client.Version == "" && client.Devel {
 		debug("setting version to >0.0.0-0")
@@ -222,7 +255,7 @@ func runShow(args []string, client *action.Show) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return client.Run(cp)
+	return client.Run(cp, vals)
 }
 
 func addRegistryClient(client *action.Show) error {

@@ -29,6 +29,7 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/registry"
+	"helm.sh/helm/v3/pkg/release"
 )
 
 // ShowOutputFormat is the format of the output of `helm show`
@@ -45,6 +46,8 @@ const (
 	ShowReadme ShowOutputFormat = "readme"
 	// ShowCRDs is the format which only shows the chart's CRDs
 	ShowCRDs ShowOutputFormat = "crds"
+	// ShowHook is the format which only show the chart's hooks
+	ShowHook ShowOutputFormat = "hook"
 )
 
 var readmeFileNames = []string{"readme.md", "readme.txt", "readme"}
@@ -58,6 +61,8 @@ func (o ShowOutputFormat) String() string {
 // It provides the implementation of 'helm show' and its respective subcommands.
 type Show struct {
 	ChartPathOptions
+	cfg              *Configuration
+	Namespace        string
 	Devel            bool
 	OutputFormat     ShowOutputFormat
 	JSONPathTemplate string
@@ -67,9 +72,11 @@ type Show struct {
 // NewShow creates a new Show object with the given configuration.
 // Deprecated: Use NewShowWithConfig
 // TODO Helm 4: Fold NewShowWithConfig back into NewShow
-func NewShow(output ShowOutputFormat) *Show {
+func NewShow(output ShowOutputFormat, cfg *Configuration, chartPathOptions ChartPathOptions) *Show {
 	return &Show{
-		OutputFormat: output,
+		cfg:              cfg,
+		OutputFormat:     output,
+		ChartPathOptions: chartPathOptions,
 	}
 }
 
@@ -89,7 +96,7 @@ func (s *Show) SetRegistryClient(client *registry.Client) {
 }
 
 // Run executes 'helm show' against the given release.
-func (s *Show) Run(chartpath string) (string, error) {
+func (s *Show) Run(chartpath string, vals map[string]interface{}) (string, error) {
 	if s.chart == nil {
 		chrt, err := loader.Load(chartpath)
 		if err != nil {
@@ -104,6 +111,8 @@ func (s *Show) Run(chartpath string) (string, error) {
 
 	var out strings.Builder
 	if s.OutputFormat == ShowChart || s.OutputFormat == ShowAll {
+		fmt.Fprintln(&out, "\n--- ChartInfo")
+
 		fmt.Fprintf(&out, "%s\n", cf)
 	}
 
@@ -123,6 +132,22 @@ func (s *Show) Run(chartpath string) (string, error) {
 					fmt.Fprintln(&out, string(f.Data))
 				}
 			}
+		}
+	}
+
+	if s.OutputFormat == ShowHook || s.OutputFormat == ShowAll {
+		if s.OutputFormat == ShowAll {
+			fmt.Fprintln(&out, "\n--- Hooks")
+		}
+		hooks, err := s.FindHooks("", s.chart, vals)
+		if err != nil {
+			return "", nil
+		}
+		if hooks == nil {
+			return out.String(), nil
+		}
+		for _, hook := range hooks {
+			fmt.Fprintf(&out, "# Source: %s\n%s\n", hook.Path, hook.Manifest)
 		}
 	}
 
@@ -162,4 +187,22 @@ func findReadme(files []*chart.File) (file *chart.File) {
 		}
 	}
 	return nil
+}
+
+func (s *Show) FindHooks(releaseName string, chrt *chart.Chart, vals map[string]interface{}) ([]*release.Hook, error) {
+	options := chartutil.ReleaseOptions{
+		Name:      releaseName,
+		Namespace: s.Namespace,
+		Revision:  1,
+	}
+	caps, err := s.cfg.getCapabilities()
+	if err != nil {
+		return nil, err
+	}
+	valuesToRender, err := chartutil.ToRenderValues(chrt, vals, options, caps)
+	hooks, _, _, err := s.cfg.renderResources(chrt, valuesToRender, releaseName, "", false, true, false, nil, false, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return hooks, nil
 }

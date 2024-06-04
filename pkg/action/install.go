@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -50,7 +49,6 @@ import (
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/releaseutil"
-	"helm.sh/helm/v3/pkg/repo"
 	"helm.sh/helm/v3/pkg/storage"
 	"helm.sh/helm/v3/pkg/storage/driver"
 )
@@ -111,6 +109,8 @@ type Install struct {
 	PostRenderer   postrender.PostRenderer
 	// Lock to control raceconditions when the process receives a SIGTERM
 	Lock sync.Mutex
+
+	C7NOptions C7NOptions
 }
 
 // ChartPathOptions captures common options used for controlling chart paths
@@ -134,9 +134,14 @@ type ChartPathOptions struct {
 }
 
 // NewInstall creates a new Install object with the given configuration.
-func NewInstall(cfg *Configuration) *Install {
-	in := &Install{
-		cfg: cfg,
+func NewInstall(cfg *Configuration, opts *Install) *Install {
+	var in = &Install{
+		cfg:              cfg,
+		ChartPathOptions: opts.ChartPathOptions,
+		Namespace:        opts.Namespace,
+		ReleaseName:      opts.ReleaseName,
+		CreateNamespace:  true,
+		C7NOptions:       opts.C7NOptions,
 	}
 	in.ChartPathOptions.registryClient = cfg.RegistryClient
 
@@ -216,16 +221,16 @@ func (i *Install) installCRDs(crds []chart.CRD) error {
 //
 // If DryRun is set to true, this will prepare the release, but not install it
 
-func (i *Install) Run(chrt *chart.Chart, vals map[string]interface{}) (*release.Release, error) {
+func (i *Install) Run(chrt *chart.Chart, vals map[string]interface{}, valsRaw string) (*release.Release, error) {
 	ctx := context.Background()
-	return i.RunWithContext(ctx, chrt, vals)
+	return i.RunWithContext(ctx, chrt, vals, valsRaw)
 }
 
 // Run executes the installation with Context
 //
 // When the task is cancelled through ctx, the function returns and the install
 // proceeds in the background.
-func (i *Install) RunWithContext(ctx context.Context, chrt *chart.Chart, vals map[string]interface{}) (*release.Release, error) {
+func (i *Install) RunWithContext(ctx context.Context, chrt *chart.Chart, vals map[string]interface{}, valsRaw string) (*release.Release, error) {
 	// Check reachability of cluster unless in client-only mode (e.g. `helm template` without `--validate`)
 	if !i.ClientOnly {
 		if err := i.cfg.KubeClient.IsReachable(); err != nil {
@@ -306,7 +311,7 @@ func (i *Install) RunWithContext(ctx context.Context, chrt *chart.Chart, vals ma
 		return nil, fmt.Errorf("user suplied labels contains system reserved label name. System labels: %+v", driver.GetSystemLabels())
 	}
 
-	rel := i.createRelease(chrt, vals, i.Labels)
+	rel := i.createRelease(chrt, vals, i.Labels, valsRaw)
 
 	var manifestDoc *bytes.Buffer
 	rel.Hooks, manifestDoc, rel.Info.Notes, err = i.cfg.renderResources(chrt, valuesToRender, i.ReleaseName, i.OutputDir, i.SubNotes, i.UseReleaseName, i.IncludeCRDs, i.PostRenderer, interactWithRemote, i.EnableDNS, i.HideSecret)
@@ -328,6 +333,14 @@ func (i *Install) RunWithContext(ctx context.Context, chrt *chart.Chart, vals ma
 	resources, err := i.cfg.KubeClient.Build(bytes.NewBufferString(rel.Manifest), !i.DisableOpenAPIValidation)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to build kubernetes objects from release manifest")
+	}
+
+	// 在这里对要创建的对象添加标签
+	for _, r := range resources {
+		err = AddLabel(r, nil, i)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// It is safe to use "force" here because these are resources currently rendered by the chart.
@@ -365,6 +378,7 @@ func (i *Install) RunWithContext(ctx context.Context, chrt *chart.Chart, vals ma
 				Name: i.Namespace,
 				Labels: map[string]string{
 					"name": i.Namespace,
+					"helm": "helm3",
 				},
 			},
 		}
@@ -436,7 +450,7 @@ func (i *Install) performInstall(rel *release.Release, toBeAdopted kube.Resource
 	var err error
 	// pre-install hooks
 	if !i.DisableHooks {
-		if err := i.cfg.execHook(rel, release.HookPreInstall, i.Timeout); err != nil {
+		if err := i.cfg.execHook(rel, release.HookPreInstall, i.Timeout, i); err != nil {
 			return rel, fmt.Errorf("failed pre-install: %s", err)
 		}
 	}
@@ -465,7 +479,7 @@ func (i *Install) performInstall(rel *release.Release, toBeAdopted kube.Resource
 	}
 
 	if !i.DisableHooks {
-		if err := i.cfg.execHook(rel, release.HookPostInstall, i.Timeout); err != nil {
+		if err := i.cfg.execHook(rel, release.HookPostInstall, i.Timeout, i); err != nil {
 			return rel, fmt.Errorf("failed post-install: %s", err)
 		}
 	}
@@ -540,13 +554,14 @@ func (i *Install) availableName() error {
 }
 
 // createRelease creates a new release object
-func (i *Install) createRelease(chrt *chart.Chart, rawVals map[string]interface{}, labels map[string]string) *release.Release {
+func (i *Install) createRelease(chrt *chart.Chart, rawVals map[string]interface{}, labels map[string]string, valuesRaw string) *release.Release {
 	ts := i.cfg.Now()
 	return &release.Release{
 		Name:      i.ReleaseName,
 		Namespace: i.Namespace,
 		Chart:     chrt,
 		Config:    rawVals,
+		ConfigRaw: valuesRaw,
 		Info: &release.Info{
 			FirstDeployed: ts,
 			LastDeployed:  ts,
@@ -730,34 +745,35 @@ OUTER:
 //
 // If 'verify' was set on ChartPathOptions, this will attempt to also verify the chart.
 func (c *ChartPathOptions) LocateChart(name string, settings *cli.EnvSettings) (string, error) {
-	if registry.IsOCI(name) && c.registryClient == nil {
-		return "", fmt.Errorf("unable to lookup chart %q, missing registry client", name)
-	}
+	//if registry.IsOCI(name) && c.registryClient == nil {
+	//	return "", fmt.Errorf("unable to lookup chart %q, missing registry client", name)
+	//}
 
-	name = strings.TrimSpace(name)
 	version := strings.TrimSpace(c.Version)
+	name = fmt.Sprintf("%scharts/%s-%s.tgz", c.RepoURL, strings.TrimSpace(name), version)
 
-	if _, err := os.Stat(name); err == nil {
-		abs, err := filepath.Abs(name)
-		if err != nil {
-			return abs, err
-		}
-		if c.Verify {
-			if _, err := downloader.VerifyChart(abs, c.Keyring); err != nil {
-				return "", err
-			}
-		}
-		return abs, nil
-	}
-	if filepath.IsAbs(name) || strings.HasPrefix(name, ".") {
-		return name, errors.Errorf("path %q not found", name)
-	}
+	//if _, err := os.Stat(name); err == nil {
+	//	abs, err := filepath.Abs(name)
+	//	if err != nil {
+	//		return abs, err
+	//	}
+	//	if c.Verify {
+	//		if _, err := downloader.VerifyChart(abs, c.Keyring); err != nil {
+	//			return "", err
+	//		}
+	//	}
+	//	return abs, nil
+	//}
+	//if filepath.IsAbs(name) || strings.HasPrefix(name, ".") {
+	//	return name, errors.Errorf("path %q not found", name)
+	//}
 
 	dl := downloader.ChartDownloader{
 		Out:     os.Stdout,
 		Keyring: c.Keyring,
 		Getters: getter.All(settings),
 		Options: []getter.Option{
+			getter.WithBasicAuth(c.Username, c.Password),
 			getter.WithPassCredentialsAll(c.PassCredentialsAll),
 			getter.WithTLSClientConfig(c.CertFile, c.KeyFile, c.CaFile),
 			getter.WithInsecureSkipVerifyTLS(c.InsecureSkipTLSverify),
@@ -767,44 +783,44 @@ func (c *ChartPathOptions) LocateChart(name string, settings *cli.EnvSettings) (
 		RepositoryCache:  settings.RepositoryCache,
 		RegistryClient:   c.registryClient,
 	}
-
-	if registry.IsOCI(name) {
-		dl.Options = append(dl.Options, getter.WithRegistryClient(c.registryClient))
-	}
-
-	if c.Verify {
-		dl.Verify = downloader.VerifyAlways
-	}
-	if c.RepoURL != "" {
-		chartURL, err := repo.FindChartInAuthAndTLSAndPassRepoURL(c.RepoURL, c.Username, c.Password, name, version,
-			c.CertFile, c.KeyFile, c.CaFile, c.InsecureSkipTLSverify, c.PassCredentialsAll, getter.All(settings))
-		if err != nil {
-			return "", err
-		}
-		name = chartURL
-
-		// Only pass the user/pass on when the user has said to or when the
-		// location of the chart repo and the chart are the same domain.
-		u1, err := url.Parse(c.RepoURL)
-		if err != nil {
-			return "", err
-		}
-		u2, err := url.Parse(chartURL)
-		if err != nil {
-			return "", err
-		}
-
-		// Host on URL (returned from url.Parse) contains the port if present.
-		// This check ensures credentials are not passed between different
-		// services on different ports.
-		if c.PassCredentialsAll || (u1.Scheme == u2.Scheme && u1.Host == u2.Host) {
-			dl.Options = append(dl.Options, getter.WithBasicAuth(c.Username, c.Password))
-		} else {
-			dl.Options = append(dl.Options, getter.WithBasicAuth("", ""))
-		}
-	} else {
-		dl.Options = append(dl.Options, getter.WithBasicAuth(c.Username, c.Password))
-	}
+	//
+	//if registry.IsOCI(name) {
+	//	dl.Options = append(dl.Options, getter.WithRegistryClient(c.registryClient))
+	//}
+	//
+	//if c.Verify {
+	//	dl.Verify = downloader.VerifyAlways
+	//}
+	//if c.RepoURL != "" {
+	//	chartURL, err := repo.FindChartInAuthAndTLSAndPassRepoURL(c.RepoURL, c.Username, c.Password, name, version,
+	//		c.CertFile, c.KeyFile, c.CaFile, c.InsecureSkipTLSverify, c.PassCredentialsAll, getter.All(settings))
+	//	if err != nil {
+	//		return "", err
+	//	}
+	//	name = chartURL
+	//
+	//	// Only pass the user/pass on when the user has said to or when the
+	//	// location of the chart repo and the chart are the same domain.
+	//	u1, err := url.Parse(c.RepoURL)
+	//	if err != nil {
+	//		return "", err
+	//	}
+	//	u2, err := url.Parse(chartURL)
+	//	if err != nil {
+	//		return "", err
+	//	}
+	//
+	//	// Host on URL (returned from url.Parse) contains the port if present.
+	//	// This check ensures credentials are not passed between different
+	//	// services on different ports.
+	//	if c.PassCredentialsAll || (u1.Scheme == u2.Scheme && u1.Host == u2.Host) {
+	//		dl.Options = append(dl.Options, getter.WithBasicAuth(c.Username, c.Password))
+	//	} else {
+	//		dl.Options = append(dl.Options, getter.WithBasicAuth("", ""))
+	//	}
+	//} else {
+	//	dl.Options = append(dl.Options, getter.WithBasicAuth(c.Username, c.Password))
+	//}
 
 	if err := os.MkdirAll(settings.RepositoryCache, 0755); err != nil {
 		return "", err

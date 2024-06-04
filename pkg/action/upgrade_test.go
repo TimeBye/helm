@@ -36,7 +36,7 @@ import (
 
 func upgradeAction(t *testing.T) *Upgrade {
 	config := actionConfigFixture(t)
-	upAction := NewUpgrade(config)
+	upAction := NewUpgrade(config, &Upgrade{})
 	upAction.Namespace = "spaced"
 
 	return upAction
@@ -56,7 +56,7 @@ func TestUpgradeRelease_Success(t *testing.T) {
 	vals := map[string]interface{}{}
 
 	ctx, done := context.WithCancel(context.Background())
-	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals)
+	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals, "")
 	done()
 	req.NoError(err)
 	is.Equal(res.Info.Status, release.StatusDeployed)
@@ -85,7 +85,7 @@ func TestUpgradeRelease_Wait(t *testing.T) {
 	upAction.Wait = true
 	vals := map[string]interface{}{}
 
-	res, err := upAction.Run(rel.Name, buildChart(), vals)
+	res, err := upAction.Run(rel.Name, buildChart(), vals, "")
 	req.Error(err)
 	is.Contains(res.Info.Description, "I timed out")
 	is.Equal(res.Info.Status, release.StatusFailed)
@@ -108,7 +108,7 @@ func TestUpgradeRelease_WaitForJobs(t *testing.T) {
 	upAction.WaitForJobs = true
 	vals := map[string]interface{}{}
 
-	res, err := upAction.Run(rel.Name, buildChart(), vals)
+	res, err := upAction.Run(rel.Name, buildChart(), vals, "")
 	req.Error(err)
 	is.Contains(res.Info.Description, "I timed out")
 	is.Equal(res.Info.Status, release.StatusFailed)
@@ -132,7 +132,7 @@ func TestUpgradeRelease_CleanupOnFail(t *testing.T) {
 	upAction.CleanupOnFail = true
 	vals := map[string]interface{}{}
 
-	res, err := upAction.Run(rel.Name, buildChart(), vals)
+	res, err := upAction.Run(rel.Name, buildChart(), vals, "")
 	req.Error(err)
 	is.NotContains(err.Error(), "unable to cleanup resources")
 	is.Contains(res.Info.Description, "I timed out")
@@ -158,7 +158,7 @@ func TestUpgradeRelease_Atomic(t *testing.T) {
 		upAction.Atomic = true
 		vals := map[string]interface{}{}
 
-		res, err := upAction.Run(rel.Name, buildChart(), vals)
+		res, err := upAction.Run(rel.Name, buildChart(), vals, "")
 		req.Error(err)
 		is.Contains(err.Error(), "arming key removed")
 		is.Contains(err.Error(), "atomic")
@@ -183,7 +183,7 @@ func TestUpgradeRelease_Atomic(t *testing.T) {
 		upAction.Atomic = true
 		vals := map[string]interface{}{}
 
-		_, err := upAction.Run(rel.Name, buildChart(), vals)
+		_, err := upAction.Run(rel.Name, buildChart(), vals, "")
 		req.Error(err)
 		is.Contains(err.Error(), "update fail")
 		is.Contains(err.Error(), "an error occurred while rolling back the release")
@@ -223,7 +223,7 @@ func TestUpgradeRelease_ReuseValues(t *testing.T) {
 
 		upAction.ReuseValues = true
 		// setting newValues and upgrading
-		res, err := upAction.Run(rel.Name, buildChart(), newValues)
+		res, err := upAction.Run(rel.Name, buildChart(), newValues, "")
 		is.NoError(err)
 
 		// Now make sure it is actually upgraded
@@ -285,7 +285,7 @@ func TestUpgradeRelease_ReuseValues(t *testing.T) {
 			withMetadataDependency(dependency),
 		)
 		// reusing values and upgrading
-		res, err := upAction.Run(rel.Name, sampleChartWithSubChart, map[string]interface{}{})
+		res, err := upAction.Run(rel.Name, sampleChartWithSubChart, map[string]interface{}{}, "")
 		is.NoError(err)
 
 		// Now get the upgraded release
@@ -344,7 +344,7 @@ func TestUpgradeRelease_ResetThenReuseValues(t *testing.T) {
 
 		upAction.ResetThenReuseValues = true
 		// setting newValues and upgrading
-		res, err := upAction.Run(rel.Name, buildChart(withValues(newChartValues)), newValues)
+		res, err := upAction.Run(rel.Name, buildChart(withValues(newChartValues)), newValues, "")
 		is.NoError(err)
 
 		// Now make sure it is actually upgraded
@@ -377,7 +377,7 @@ func TestUpgradeRelease_Pending(t *testing.T) {
 
 	vals := map[string]interface{}{}
 
-	_, err := upAction.Run(rel.Name, buildChart(), vals)
+	_, err := upAction.Run(rel.Name, buildChart(), vals, "")
 	req.Contains(err.Error(), "progress", err)
 }
 
@@ -402,7 +402,7 @@ func TestUpgradeRelease_Interrupted_Wait(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	time.AfterFunc(time.Second, cancel)
 
-	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals)
+	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals, "")
 
 	req.Error(err)
 	is.Contains(res.Info.Description, "Upgrade \"interrupted-release\" failed: context canceled")
@@ -431,7 +431,7 @@ func TestUpgradeRelease_Interrupted_Atomic(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	time.AfterFunc(time.Second, cancel)
 
-	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals)
+	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(), vals, "")
 
 	req.Error(err)
 	is.Contains(err.Error(), "release interrupted-release failed, and has been rolled back due to atomic being set: context canceled")
@@ -480,7 +480,7 @@ func TestUpgradeRelease_Labels(t *testing.T) {
 		"key3": "val3",
 	}
 	// setting newValues and upgrading
-	res, err := upAction.Run(rel.Name, buildChart(), nil)
+	res, err := upAction.Run(rel.Name, buildChart(), nil, "")
 	is.NoError(err)
 
 	// Now make sure it is actually upgraded and labels were merged
@@ -528,7 +528,7 @@ func TestUpgradeRelease_SystemLabels(t *testing.T) {
 		"owner": "val3",
 	}
 	// setting newValues and upgrading
-	_, err = upAction.Run(rel.Name, buildChart(), nil)
+	_, err = upAction.Run(rel.Name, buildChart(), nil, "")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -550,7 +550,7 @@ func TestUpgradeRelease_DryRun(t *testing.T) {
 	vals := map[string]interface{}{}
 
 	ctx, done := context.WithCancel(context.Background())
-	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals)
+	res, err := upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals, "")
 	done()
 	req.NoError(err)
 	is.Equal(release.StatusPendingUpgrade, res.Info.Status)
@@ -566,7 +566,7 @@ func TestUpgradeRelease_DryRun(t *testing.T) {
 	vals = map[string]interface{}{}
 
 	ctx, done = context.WithCancel(context.Background())
-	res, err = upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals)
+	res, err = upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals, "")
 	done()
 	req.NoError(err)
 	is.Equal(release.StatusPendingUpgrade, res.Info.Status)
@@ -582,7 +582,7 @@ func TestUpgradeRelease_DryRun(t *testing.T) {
 	vals = map[string]interface{}{}
 
 	ctx, done = context.WithCancel(context.Background())
-	_, err = upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals)
+	_, err = upAction.RunWithContext(ctx, rel.Name, buildChart(withSampleSecret()), vals, "")
 	done()
 	req.Error(err)
 }
